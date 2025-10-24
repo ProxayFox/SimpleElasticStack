@@ -1,0 +1,20 @@
+server.name: kibana
+server.host: "0.0.0.0"
+server.shutdownTimeout: "5s"
+elasticsearch.hosts: [ "https://elasticsearch:9200" ]
+monitoring.ui.container.elasticsearch.enabled: true
+
+logging:
+  appenders:
+    default:
+      type: console
+      layout:
+        type: pattern
+    file:
+      type: file
+      fileName: /logs/kibana/kibana.log
+      layout:
+        type: pattern
+  root:
+    appenders: [default, file]
+    level: all

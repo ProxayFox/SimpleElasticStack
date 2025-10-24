@@ -1,0 +1,246 @@
+name: simple_elk
+services:
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch${STACK_IMAGE}:${STACK_VERSION:-9.1.5}
+    container_name: elasticsearch-setup
+    profiles:
+      - setup
+    networks:
+      - elastic
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+    user: "0"
+    restart: "no"
+    command: >
+      bash -c '
+        if [ x${ELASTIC_PASSWORD} == x ]; then
+          echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
+          exit 1;
+        elif [ x${KIBANA_PASSWORD} == x ]; then
+          echo "Set the KIBANA_PASSWORD environment variable in the .env file";
+          exit 1;
+        fi;
+        if [ ! -f config/certs/ca.zip ]; then
+          echo "Creating CA";
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
+          unzip config/certs/ca.zip -d config/certs;
+        fi;
+        if [ ! -f config/certs/certs.zip ]; then
+          echo "Creating certs";
+          echo -ne \
+          "instances:\n"\
+          "  - name: elasticsearch\n"\
+          "    dns:\n"\
+          "      - elasticsearch\n"\
+          "      - localhost\n"\
+          "    ip:\n"\
+          "      - 127.0.0.1\n"\
+          "      - ${HOST_IP}\n"\
+          "  - name: kibana\n"\
+          "    dns:\n"\
+          "      - kibana\n"\
+          "      - localhost\n"\
+          "    ip:\n"\
+          "      - 127.0.0.1\n"\
+          "      - ${HOST_IP}\n"\
+          "  - name: fleet-server\n"\
+          "    dns:\n"\
+          "      - fleet-server\n"\
+          "      - localhost\n"\
+          "    ip:\n"\
+          "      - 127.0.0.1\n"\
+          "      - ${HOST_IP}\n"\
+          > config/certs/instances.yml;
+          bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
+          unzip config/certs/certs.zip -d config/certs;
+        fi;
+        echo "Setting file permissions"
+        chown -R root:root config/certs;
+        find . -type d -exec chmod 750 \{\} \;;
+        find . -type f -exec chmod 640 \{\} \;;
+        echo "Waiting for Elasticsearch availability";
+        until curl -s --cacert config/certs/ca/ca.crt https://elasticsearch:9200 | grep -q "missing authentication credentials"; do sleep 30; done;
+        echo "Setting kibana_system password";
+        until curl -s -X POST --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" https://elasticsearch:9200/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
+        echo "All done!";
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f config/certs/elasticsearch/elasticsearch.crt ]"]
+      interval: 1s
+      timeout: 5s
+      retries: 120
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch${STACK_IMAGE}:${STACK_VERSION:-9.1.5}
+    container_name: elasticsearch
+    networks:
+      - elastic
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+      - esdata:/usr/share/elasticsearch/data
+      - logs:/logs
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=${CLUSTER_NAME}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/elasticsearch/elasticsearch.key
+      - xpack.security.http.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/elasticsearch/elasticsearch.key
+      - xpack.security.transport.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.license.self_generated.type=${LICENSE}
+      - xpack.ml.use_auto_machine_memory_percent=true
+      - xpack.monitoring.collection.enabled=true
+      - path.logs=/logs/elasticsearch
+    mem_limit: ${MEM_LIMIT}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: curl --cacert /usr/share/elasticsearch/config/certs/ca/ca.crt -u elastic:$ELASTIC_PASSWORD https://elasticsearch:9200/_cluster/health\?pretty | grep status | grep -E "green|yellow"
+      interval: 10s
+      timeout: 10s
+      retries: 50
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana${STACK_IMAGE}:${STACK_VERSION:-9.1.5}
+    container_name: kibana
+    networks:
+      - elastic
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "5601:5601"
+    volumes:
+      - certs:/usr/share/kibana/config/certs
+      - logs:/logs
+      - ./configs/kibana.yml:/usr/share/kibana/config/kibana.yml
+    environment:
+      - SERVERNAME=kibana
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - ELASTICSEARCH_HOSTS=https://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_REPORTING_ENCRYPTIONKEY=${REPORTING_ENCRYPTION_KEY}
+      - XPACK_SECURITY_ENCRYPTIONKEY=${SECURITY_ENCRYPTION_KEY}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found' && curl -s --cacert /usr/share/kibana/config/certs/ca/ca.crt -u elastic:$$ELASTIC_PASSWORD https://elasticsearch:9200/_cluster/health | grep -q -E '\"status\":\"(green|yellow)\"'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+
+  fleet-setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch${STACK_IMAGE}:${STACK_VERSION:-9.1.5}
+    container_name: fleet-setup
+    profiles:
+      - setup
+    networks:
+      - elastic
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+      - ./fleet-setup.sh:/usr/local/bin/fleet-setup.sh:ro
+      - fleet-data:/tmp
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD}
+    depends_on:
+      kibana:
+        condition: service_healthy
+    restart: "no"
+    command: /usr/local/bin/fleet-setup.sh
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /tmp/fleet-config.env ]"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  fleet-server:
+    image: docker.elastic.co/elastic-agent/elastic-agent-complete:${STACK_VERSION:-9.1.5}
+    container_name: fleet-server
+    hostname: fleet-server
+    user: root
+    profiles:
+      - fleet
+    networks:
+      - elastic
+    ports:
+      - "8220:8220"
+    volumes:
+      - certs:/certs:ro
+      - logs:/logs/external
+    environment:
+      - FLEET_SERVER_ENABLE=true
+      - FLEET_SERVER_ELASTICSEARCH_HOST=https://elasticsearch:9200
+      - FLEET_SERVER_ELASTICSEARCH_CA=/certs/ca/ca.crt
+      - FLEET_SERVER_SERVICE_TOKEN=${FLEET_SERVER_SERVICE_TOKEN}
+      - FLEET_SERVER_POLICY_ID=fleet-server-policy
+      - FLEET_SERVER_CERT=/certs/elasticsearch/elasticsearch.crt
+      - FLEET_SERVER_CERT_KEY=/certs/elasticsearch/elasticsearch.key
+      - FLEET_SERVER_INSECURE_HTTP=false
+      - FLEET_INSECURE=true
+      - FLEET_CA=/certs/ca/ca.crt
+      - FLEET_URL=https://fleet-server:8220
+      - KIBANA_FLEET_HOST=http://kibana:5601
+      - KIBANA_FLEET_USERNAME=elastic
+      - KIBANA_FLEET_PASSWORD=${ELASTIC_PASSWORD}
+      - CERTIFICATE_AUTHORITIES=/certs/ca/ca.crt
+    depends_on:
+      kibana:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -k https://localhost:8220/api/status | grep -q HEALTHY"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+networks:
+  elastic:
+
+volumes:
+  esdata:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./esdata
+      o: bind
+    labels:
+      com.example.description: "Elasticsearch data volume"
+  certs:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./certs
+      o: bind
+    labels:
+      com.example.description: "Elasticsearch certs volume"
+  fleet-data:
+    driver: local
+    labels:
+      com.example.description: "Fleet configuration data"
+  logs:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./logs
+      o: bind
+    labels:
+      com.example.description: "Shared logs volume for all services"
+    
