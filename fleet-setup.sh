@@ -18,6 +18,13 @@ set -e
 
 echo "Starting Fleet Server setup..."
 
+# Set default Fleet Server host if not provided
+FLEET_SERVER_HOST=${FLEET_SERVER_HOST:-"https://fleet-server:8220"}
+ELASTICSEARCH_OUTPUT_HOST=${ELASTICSEARCH_OUTPUT_HOST:-"https://elasticsearch:9200"}
+
+echo "Fleet Server Host: ${FLEET_SERVER_HOST}"
+echo "Elasticsearch Output Host: ${ELASTICSEARCH_OUTPUT_HOST}"
+
 # Wait for Kibana to be ready
 echo "Waiting for Kibana to be available..."
 until curl -s -k -u "elastic:${ELASTIC_PASSWORD}" "http://kibana:5601/api/status" | grep -q '"level":"available"'; do
@@ -72,6 +79,91 @@ if [ -z "$POLICY_ID" ]; then
 fi
 
 echo "Fleet Server Policy ID: $POLICY_ID"
+
+# Configure Fleet Server host
+echo "Configuring Fleet Server host..."
+FLEET_SERVER_HOST_RESPONSE=$(curl -s -k -u "elastic:${ELASTIC_PASSWORD}" \
+  -X POST \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/json" \
+  "http://kibana:5601/api/fleet/fleet_server_hosts" \
+  -d "{
+    \"name\": \"Default Fleet Server\",
+    \"host_urls\": [\"${FLEET_SERVER_HOST}\"],
+    \"is_default\": true
+  }" || echo '{}')
+
+FLEET_HOST_ID=$(echo "$FLEET_SERVER_HOST_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+if [ -n "$FLEET_HOST_ID" ]; then
+  echo "Fleet Server host configured with ID: $FLEET_HOST_ID"
+else
+  echo "Fleet Server host may already exist, checking existing hosts..."
+  EXISTING_HOSTS=$(curl -s -k -u "elastic:${ELASTIC_PASSWORD}" \
+    -H "kbn-xsrf: true" \
+    "http://kibana:5601/api/fleet/fleet_server_hosts" || echo '{}')
+  echo "Existing Fleet Server hosts: $EXISTING_HOSTS"
+fi
+
+# Configure external Fleet Server host if provided
+if [ -n "$FLEET_SERVER_EXTERNAL_HOST" ]; then
+  echo "Configuring external Fleet Server host: ${FLEET_SERVER_EXTERNAL_HOST}"
+  EXTERNAL_HOST_RESPONSE=$(curl -s -k -u "elastic:${ELASTIC_PASSWORD}" \
+    -X POST \
+    -H "kbn-xsrf: true" \
+    -H "Content-Type: application/json" \
+    "http://kibana:5601/api/fleet/fleet_server_hosts" \
+    -d "{
+      \"name\": \"External Fleet Server\",
+      \"host_urls\": [\"${FLEET_SERVER_EXTERNAL_HOST}\"],
+      \"is_default\": false
+    }" || echo '{}')
+  
+  EXTERNAL_HOST_ID=$(echo "$EXTERNAL_HOST_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  
+  if [ -n "$EXTERNAL_HOST_ID" ]; then
+    echo "External Fleet Server host configured with ID: $EXTERNAL_HOST_ID"
+  else
+    echo "External Fleet Server host may already exist or failed to create"
+  fi
+fi
+
+# Configure Elasticsearch output
+echo "Configuring Elasticsearch output..."
+# First, get the default output ID
+OUTPUT_RESPONSE=$(curl -s -k -u "elastic:${ELASTIC_PASSWORD}" \
+  -H "kbn-xsrf: true" \
+  "http://kibana:5601/api/fleet/outputs" || echo '{}')
+
+DEFAULT_OUTPUT_ID=$(echo "$OUTPUT_RESPONSE" | grep -o '"id":"[^"]*","is_default":true' | head -1 | cut -d'"' -f4)
+
+if [ -z "$DEFAULT_OUTPUT_ID" ]; then
+  # Try to get any output ID
+  DEFAULT_OUTPUT_ID=$(echo "$OUTPUT_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+fi
+
+if [ -n "$DEFAULT_OUTPUT_ID" ]; then
+  echo "Found default output ID: $DEFAULT_OUTPUT_ID"
+  echo "Updating Elasticsearch output configuration..."
+  
+  curl -s -k -u "elastic:${ELASTIC_PASSWORD}" \
+    -X PUT \
+    -H "kbn-xsrf: true" \
+    -H "Content-Type: application/json" \
+    "http://kibana:5601/api/fleet/outputs/${DEFAULT_OUTPUT_ID}" \
+    -d "{
+      \"name\": \"default\",
+      \"type\": \"elasticsearch\",
+      \"hosts\": [\"${ELASTICSEARCH_OUTPUT_HOST}\"],
+      \"is_default\": true,
+      \"is_default_monitoring\": true,
+      \"ca_trusted_fingerprint\": \"\"
+    }" || echo "Failed to update output"
+  
+  echo "Elasticsearch output configured to: ${ELASTICSEARCH_OUTPUT_HOST}"
+else
+  echo "Warning: Could not find default output ID"
+fi
 
 # Generate Fleet Server service token
 echo "Generating Fleet Server service token..."

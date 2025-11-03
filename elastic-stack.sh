@@ -88,6 +88,47 @@ generate_encryption_key() {
   openssl rand -base64 32 | tr -d '\n'
 }
 
+wait_for_services_healthy() {
+  print_header "Waiting for Services to be Healthy"
+  
+  print_info "Waiting for Elasticsearch..."
+  for i in {1..120}; do
+    if docker compose ps elasticsearch 2>/dev/null | grep -q "healthy"; then
+      print_success "Elasticsearch is healthy"
+      break
+    fi
+    if [ $i -eq 120 ]; then
+      print_warning "Elasticsearch health check timeout"
+    fi
+    sleep 2
+  done
+  
+  print_info "Waiting for Kibana..."
+  for i in {1..120}; do
+    if docker compose ps kibana 2>/dev/null | grep -q "healthy"; then
+      print_success "Kibana is healthy"
+      break
+    fi
+    if [ $i -eq 120 ]; then
+      print_warning "Kibana health check timeout"
+    fi
+    sleep 2
+  done
+  
+  print_info "Waiting for Fleet Server..."
+  for i in {1..120}; do
+    if docker compose ps fleet-server 2>/dev/null | grep -q "healthy"; then
+      print_success "Fleet Server is healthy"
+      break
+    fi
+    if [ $i -eq 120 ]; then
+      print_warning "Fleet Server health check timeout, checking logs..."
+      docker compose logs fleet-server --tail 20
+    fi
+    sleep 2
+  done
+}
+
 check_and_generate_encryption_keys() {
   print_header "Checking Encryption Keys"
   
@@ -355,37 +396,7 @@ new_installation() {
   
   # Step 5: Wait for services to be healthy
   print_header "Step 5: Waiting for Services to be Healthy"
-  
-  print_info "Waiting for Elasticsearch..."
-  for i in {1..120}; do
-    if docker compose ps elasticsearch 2>/dev/null | grep -q "healthy"; then
-      print_success "Elasticsearch is healthy"
-      break
-    fi
-    sleep 2
-  done
-  
-  print_info "Waiting for Kibana..."
-  for i in {1..120}; do
-    if docker compose ps kibana 2>/dev/null | grep -q "healthy"; then
-      print_success "Kibana is healthy"
-      break
-    fi
-    sleep 2
-  done
-  
-  print_info "Waiting for Fleet Server..."
-  for i in {1..120}; do
-    if docker compose ps fleet-server 2>/dev/null | grep -q "healthy"; then
-      print_success "Fleet Server is healthy"
-      break
-    fi
-    if [ $i -eq 120 ]; then
-      print_warning "Fleet Server health check timeout, checking logs..."
-      docker compose logs fleet-server --tail 20
-    fi
-    sleep 2
-  done
+  wait_for_services_healthy
   
   # Final status
   print_header "Installation Complete!"
@@ -407,18 +418,19 @@ start_stack() {
   print_info "Starting services..."
   docker compose --profile fleet up -d
   
-  print_info "Waiting for services to be ready..."
-  sleep 5
+  # Wait for services to be healthy
+  wait_for_services_healthy
   
+  # Final status
   show_status
-  print_success "Stack started"
+  print_success "Stack started successfully!"
 }
 
 stop_stack() {
   print_header "Stopping Elastic Stack"
   
   print_info "Stopping services..."
-  docker compose down
+  docker compose --profile fleet down
   
   print_success "Stack stopped"
 }

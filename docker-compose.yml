@@ -161,6 +161,9 @@ services:
     environment:
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
       - KIBANA_PASSWORD=${KIBANA_PASSWORD}
+      - FLEET_SERVER_HOST=${FLEET_SERVER_HOST:-https://fleet-server:8220}
+      - FLEET_SERVER_EXTERNAL_HOST=${FLEET_SERVER_EXTERNAL_HOST}
+      - ELASTICSEARCH_OUTPUT_HOST=${ELASTICSEARCH_OUTPUT_HOST:-https://elasticsearch:9200}
     depends_on:
       kibana:
         condition: service_healthy
