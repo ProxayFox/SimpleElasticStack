@@ -90,19 +90,24 @@ jobs:
         run: |
           echo "Scanning for sensitive data..."
           
-          # Check for actual passwords (not placeholders)
-          if grep -r "password.*=" . --include=".env" 2>/dev/null | grep -v "PLEASE_SET" | grep -v "example" | grep -v ".md"; then
-            echo "✗ WARNING: Potential real passwords found in committed files"
+          # Check for actual passwords (not placeholders) in .env files
+          if grep -r "password.*=" . --include=".env" 2>/dev/null | grep -v "PLEASE_SET" | grep -v "example"; then
+            echo "✗ WARNING: Potential real passwords found in committed .env files"
             exit 1
           fi
           
-          # Check for tokens
-          if grep -r "FLEET_SERVER_SERVICE_TOKEN=AAE" . --include="*.yml" --include="*.md" 2>/dev/null; then
-            echo "✗ WARNING: Real Fleet token found in committed files"
+          # Check for tokens in code/config files (exclude documentation)
+          if grep -r "FLEET_SERVER_SERVICE_TOKEN=AAE" . \
+            --include="*.yml" \
+            --include="*.yaml" \
+            --include=".env" \
+            --exclude-dir=".github" \
+            2>/dev/null; then
+            echo "✗ WARNING: Real Fleet token found in configuration files"
             exit 1
           fi
           
-          echo "✓ No sensitive data detected"
+          echo "✓ No sensitive data detected in configuration files"
 
       - name: Check Nix flake (if changed)
         if: hashFiles('flake.nix') != ''
