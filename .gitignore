@@ -3,6 +3,5 @@ esdata/*
 *.crt
 .env
 logs/*
-.github
 .direnv
 .envrc
