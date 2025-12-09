@@ -1,0 +1,221 @@
+name: CI - Test Elastic Stack
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+env:
+  ELASTIC_PASSWORD: test_password_12345
+  KIBANA_PASSWORD: test_password_12345
+  HOST_IP: 127.0.0.1
+  STACK_VERSION: 9.2.0
+  STACK_IMAGE: -wolfi
+  LICENSE: basic
+  CLUSTER_NAME: test_elk
+  MEM_LIMIT: 2g
+
+jobs:
+  test:
+    name: Test Stack Deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up system requirements
+        run: |
+          # Increase vm.max_map_count for Elasticsearch
+          sudo sysctl -w vm.max_map_count=262144
+          
+          # Verify Docker
+          docker --version
+          docker compose version
+
+      - name: Create .env file
+        run: |
+          cat > .env << EOF
+          ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+          KIBANA_PASSWORD=${KIBANA_PASSWORD}
+          HOST_IP=${HOST_IP}
+          STACK_VERSION=${STACK_VERSION}
+          STACK_IMAGE=${STACK_IMAGE}
+          LICENSE=${LICENSE}
+          CLUSTER_NAME=${CLUSTER_NAME}
+          MEM_LIMIT=${MEM_LIMIT}
+          EOF
+
+      - name: Generate encryption keys
+        run: |
+          echo "ENCRYPTION_KEY=$(openssl rand -base64 32)" >> .env
+          echo "REPORTING_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> .env
+          echo "SECURITY_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> .env
+
+      - name: Create required directories
+        run: |
+          mkdir -p certs esdata logs/elasticsearch logs/kibana logs/elastic-agent
+          chmod 755 certs esdata logs/elasticsearch logs/kibana logs/elastic-agent
+
+      - name: Run setup containers
+        run: |
+          echo "Starting certificate generation and Fleet setup..."
+          docker compose --profile setup up -d
+          
+          echo "Waiting for elasticsearch-setup to complete..."
+          timeout 300 bash -c 'until docker inspect elasticsearch-setup 2>/dev/null | grep -q "\"Status\": \"exited\""; do sleep 5; done'
+          
+          if docker inspect elasticsearch-setup | grep -q '"ExitCode": 0'; then
+            echo "✓ Certificate generation successful"
+          else
+            echo "✗ Certificate generation failed"
+            docker compose logs setup
+            exit 1
+          fi
+          
+          echo "Waiting for fleet-setup to complete..."
+          timeout 300 bash -c 'until docker inspect fleet-setup 2>/dev/null | grep -q "\"Status\": \"exited\""; do sleep 5; done'
+          
+          if docker inspect fleet-setup | grep -q '"ExitCode": 0'; then
+            echo "✓ Fleet setup successful"
+          else
+            echo "✗ Fleet setup failed"
+            docker compose logs fleet-setup
+            exit 1
+          fi
+
+      - name: Extract Fleet service token
+        run: |
+          SERVICE_TOKEN=$(docker compose logs fleet-setup | grep "FLEET_SERVER_SERVICE_TOKEN=" | tail -1 | cut -d'=' -f2)
+          
+          if [ -z "$SERVICE_TOKEN" ]; then
+            echo "✗ Failed to extract service token"
+            docker compose logs fleet-setup
+            exit 1
+          fi
+          
+          echo "FLEET_SERVER_SERVICE_TOKEN=${SERVICE_TOKEN}" >> .env
+          echo "✓ Service token extracted"
+
+      - name: Start Elasticsearch and Kibana
+        run: |
+          docker compose down
+          docker compose up -d elasticsearch kibana
+          echo "Waiting for services to start..."
+          sleep 10
+
+      - name: Wait for Elasticsearch to be healthy
+        run: |
+          echo "Waiting for Elasticsearch to be healthy..."
+          timeout 180 bash -c 'until docker compose ps elasticsearch 2>/dev/null | grep -q "healthy"; do sleep 5; echo "Still waiting..."; done'
+          echo "✓ Elasticsearch is healthy"
+
+      - name: Wait for Kibana to be healthy
+        run: |
+          echo "Waiting for Kibana to be healthy..."
+          timeout 300 bash -c 'until docker compose ps kibana 2>/dev/null | grep -q "healthy"; do sleep 5; echo "Still waiting..."; done'
+          echo "✓ Kibana is healthy"
+
+      - name: Start Fleet Server
+        run: |
+          docker compose --profile fleet up -d fleet-server
+          echo "Waiting for Fleet Server to start..."
+          sleep 10
+
+      - name: Wait for Fleet Server to be healthy
+        run: |
+          echo "Waiting for Fleet Server to be healthy..."
+          timeout 180 bash -c 'until docker compose ps fleet-server 2>/dev/null | grep -q "healthy"; do sleep 5; echo "Still waiting..."; done'
+          echo "✓ Fleet Server is healthy"
+
+      - name: Test Elasticsearch API
+        run: |
+          echo "Testing Elasticsearch cluster health..."
+          HEALTH=$(docker exec elasticsearch curl -s -k -u "elastic:${ELASTIC_PASSWORD}" https://localhost:9200/_cluster/health?pretty)
+          echo "$HEALTH"
+          
+          if echo "$HEALTH" | grep -q '"status"'; then
+            echo "✓ Elasticsearch API responding"
+          else
+            echo "✗ Elasticsearch API not responding correctly"
+            exit 1
+          fi
+
+      - name: Test Kibana API
+        run: |
+          echo "Testing Kibana API..."
+          STATUS=$(docker exec kibana curl -s http://localhost:5601/api/status)
+          echo "$STATUS"
+          
+          if echo "$STATUS" | grep -q '"level":"available"'; then
+            echo "✓ Kibana API responding"
+          else
+            echo "✗ Kibana API not responding correctly"
+            exit 1
+          fi
+
+      - name: Test Fleet Server API
+        run: |
+          echo "Testing Fleet Server API..."
+          STATUS=$(docker exec fleet-server curl -s -k https://localhost:8220/api/status)
+          echo "$STATUS"
+          
+          if echo "$STATUS" | grep -q 'HEALTHY'; then
+            echo "✓ Fleet Server API responding"
+          else
+            echo "✗ Fleet Server API not responding correctly"
+            exit 1
+          fi
+
+      - name: Test data indexing
+        run: |
+          echo "Testing document indexing..."
+          docker exec elasticsearch curl -s -k -u "elastic:${ELASTIC_PASSWORD}" \
+            -X POST "https://localhost:9200/test-index/_doc" \
+            -H "Content-Type: application/json" \
+            -d '{"message": "CI test document", "timestamp": "2025-12-09T00:00:00Z"}'
+          
+          sleep 2
+          
+          echo "Testing document search..."
+          SEARCH=$(docker exec elasticsearch curl -s -k -u "elastic:${ELASTIC_PASSWORD}" \
+            "https://localhost:9200/test-index/_search?pretty")
+          
+          if echo "$SEARCH" | grep -q "CI test document"; then
+            echo "✓ Document indexing and search working"
+          else
+            echo "✗ Document indexing or search failed"
+            exit 1
+          fi
+
+      - name: Show final status
+        if: always()
+        run: |
+          echo "=== Final Stack Status ==="
+          docker compose ps
+          
+          echo ""
+          echo "=== Elasticsearch Logs (last 50 lines) ==="
+          docker compose logs --tail=50 elasticsearch || true
+          
+          echo ""
+          echo "=== Kibana Logs (last 50 lines) ==="
+          docker compose logs --tail=50 kibana || true
+          
+          echo ""
+          echo "=== Fleet Server Logs (last 50 lines) ==="
+          docker compose logs --tail=50 fleet-server || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up..."
+          docker compose --profile fleet --profile setup down -v
+          sudo rm -rf certs esdata logs

@@ -1,0 +1,137 @@
+name: PR Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  validate-changes:
+    name: Validate PR Changes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for required files
+        run: |
+          echo "Checking for required files..."
+          
+          if [ ! -f "docker-compose.yml" ]; then
+            echo "✗ docker-compose.yml is missing"
+            exit 1
+          fi
+          echo "✓ docker-compose.yml exists"
+          
+          if [ ! -f ".env.example" ]; then
+            echo "✗ .env.example is missing"
+            exit 1
+          fi
+          echo "✓ .env.example exists"
+          
+          if [ ! -f "elastic-stack.sh" ]; then
+            echo "✗ elastic-stack.sh is missing"
+            exit 1
+          fi
+          echo "✓ elastic-stack.sh exists"
+
+      - name: Validate docker-compose.yml syntax
+        run: |
+          echo "Validating docker-compose.yml syntax..."
+          docker compose config > /dev/null
+          echo "✓ docker-compose.yml is valid"
+
+      - name: Check script syntax
+        run: |
+          echo "Checking shell script syntax..."
+          bash -n elastic-stack.sh
+          bash -n fleet-setup.sh
+          echo "✓ Shell scripts have valid syntax"
+
+      - name: Validate .env.example
+        run: |
+          echo "Checking .env.example has required variables..."
+          
+          REQUIRED_VARS=(
+            "ELASTIC_PASSWORD"
+            "KIBANA_PASSWORD"
+            "HOST_IP"
+            "STACK_VERSION"
+            "STACK_IMAGE"
+            "CLUSTER_NAME"
+            "MEM_LIMIT"
+          )
+          
+          for var in "${REQUIRED_VARS[@]}"; do
+            if grep -q "^${var}=" .env.example || grep -q "^#${var}=" .env.example; then
+              echo "✓ ${var} found"
+            else
+              echo "✗ ${var} missing from .env.example"
+              exit 1
+            fi
+          done
+
+      - name: Check for sensitive data
+        run: |
+          echo "Scanning for sensitive data..."
+          
+          # Check for actual passwords (not placeholders)
+          if grep -r "password.*=" . --include=".env" 2>/dev/null | grep -v "PLEASE_SET" | grep -v "example" | grep -v ".md"; then
+            echo "✗ WARNING: Potential real passwords found in committed files"
+            exit 1
+          fi
+          
+          # Check for tokens
+          if grep -r "FLEET_SERVER_SERVICE_TOKEN=AAE" . --include="*.yml" --include="*.md" 2>/dev/null; then
+            echo "✗ WARNING: Real Fleet token found in committed files"
+            exit 1
+          fi
+          
+          echo "✓ No sensitive data detected"
+
+      - name: Check Nix flake (if changed)
+        if: hashFiles('flake.nix') != ''
+        run: |
+          echo "Installing Nix..."
+          curl -L https://nixos.org/nix/install | sh -s -- --daemon --yes || true
+          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh || true
+          
+          if command -v nix &> /dev/null; then
+            echo "Checking Nix flake..."
+            nix flake check || echo "⚠ Nix flake check failed (non-blocking)"
+          else
+            echo "⚠ Nix not available, skipping flake check"
+          fi
+
+  shellcheck:
+    name: ShellCheck Linting
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          severity: warning
+          ignore_paths: |
+            node_modules
+            .git
+        continue-on-error: true
+
+  markdown-lint:
+    name: Markdown Linting
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Lint markdown files
+        uses: avto-dev/markdown-lint@v1
+        with:
+          config: '.markdownlint.json'
+          args: '.'
+        continue-on-error: true
