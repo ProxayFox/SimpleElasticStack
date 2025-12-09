@@ -1,0 +1,53 @@
+# Dependabot configuration for SimpleElasticStack
+# Monitors Docker images and GitHub Actions for updates
+
+version: 2
+updates:
+  # Monitor Docker images in docker-compose.yml
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "ProxayFox"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore(docker)"
+      include: "scope"
+    # Group Elastic Stack updates together
+    groups:
+      elastic-stack:
+        patterns:
+          - "docker.elastic.co/elasticsearch/*"
+          - "docker.elastic.co/kibana/*"
+          - "docker.elastic.co/elastic-agent/*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Monitor Nix flake dependencies
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "ProxayFox"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+
+  # Note: Dependabot doesn't natively support Nix flakes
+  # Use 'nix flake update' manually or consider:
+  # - GitHub Actions workflow with scheduled flake updates
+  # - Renovate bot (supports Nix flakes)
