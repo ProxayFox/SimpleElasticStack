@@ -62,7 +62,9 @@ jobs:
       - name: Create required directories
         run: |
           mkdir -p certs esdata logs/elasticsearch logs/kibana logs/elastic-agent
-          chmod 755 certs esdata logs/elasticsearch logs/kibana logs/elastic-agent
+          chmod 755 certs esdata logs logs/elasticsearch logs/kibana logs/elastic-agent
+          # Elasticsearch runs as UID 1000, so we need to give it ownership
+          sudo chown -R 1000:1000 esdata logs/elasticsearch
 
       - name: Run setup containers
         run: |

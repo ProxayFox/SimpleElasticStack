@@ -9,6 +9,21 @@ jobs:
     name: Validate PR Changes
     runs-on: ubuntu-latest
 
+    env:
+      # Set defaults for docker-compose validation
+      ELASTIC_PASSWORD: validation_test
+      KIBANA_PASSWORD: validation_test
+      HOST_IP: 127.0.0.1
+      STACK_VERSION: 9.2.0
+      STACK_IMAGE: -wolfi
+      LICENSE: basic
+      CLUSTER_NAME: test_elk
+      MEM_LIMIT: 4g
+      ENCRYPTION_KEY: test_key_for_validation_only
+      REPORTING_ENCRYPTION_KEY: test_key_for_validation_only
+      SECURITY_ENCRYPTION_KEY: test_key_for_validation_only
+      FLEET_SERVER_SERVICE_TOKEN: test_token_for_validation_only
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
